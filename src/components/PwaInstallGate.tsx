@@ -1,5 +1,5 @@
 import { useEffect, useState, type PropsWithChildren } from "react";
-import { Download, Plus, Radar, Share2, Smartphone } from "lucide-react";
+import { Download, Plus, Share2, Smartphone } from "lucide-react";
 
 type InstallState = "idle" | "prompting" | "accepted" | "dismissed" | "manual";
 
@@ -88,22 +88,40 @@ export function PwaInstallGate({ children }: PropsWithChildren) {
       <section className="w-full max-w-md bg-slate-950 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden">
         <div className="h-1.5 bg-red-600" />
         <div className="p-6 sm:p-7">
-          <div className="flex items-start gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-red-600 flex items-center justify-center shadow-lg shadow-red-950/40 shrink-0">
-              <Radar className="w-8 h-8 text-white" />
+          <div className="text-center">
+            <div className="mx-auto w-24 h-24 flex items-center justify-center drop-shadow-2xl">
+              <svg viewBox="0 0 100 100" className="w-full h-full" aria-hidden="true">
+                <polygon
+                  points="29,4 71,4 96,29 96,71 71,96 29,96 4,71 4,29"
+                  fill="#dc2626"
+                  stroke="white"
+                  strokeWidth="6"
+                  strokeLinejoin="round"
+                />
+                <text
+                  x="50"
+                  y="54"
+                  fill="white"
+                  fontFamily="Inter, ui-sans-serif, system-ui, sans-serif"
+                  fontWeight="900"
+                  fontSize="24"
+                  textAnchor="middle"
+                  dominantBaseline="middle"
+                >
+                  PARE
+                </text>
+              </svg>
             </div>
 
-            <div className="min-w-0">
-              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-red-400">
-                Acesso restrito
-              </p>
-              <h1 className="mt-1 text-2xl font-black leading-tight">
-                Radar Alerta Maracanaú
-              </h1>
-              <p className="mt-2 text-sm leading-relaxed text-slate-300">
-                Este app só funciona instalado como PWA para garantir uma experiência dedicada de alerta no trânsito.
-              </p>
-            </div>
+            <p className="mt-5 text-[10px] font-black uppercase tracking-[0.2em] text-red-400">
+              Acesso restrito
+            </p>
+            <h1 className="mt-1 text-2xl font-black leading-tight">
+              PARE ALERTA MARACANAÚ
+            </h1>
+            <p className="mt-2 text-sm leading-relaxed text-slate-300">
+              Este app só funciona instalado como PWA para garantir uma experiência dedicada de alerta no trânsito.
+            </p>
           </div>
 
           <button

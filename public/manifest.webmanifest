@@ -1,6 +1,6 @@
 {
-  "name": "Radar Alerta Maracanaú",
-  "short_name": "Radar Alerta",
+  "name": "PARE ALERTA MARACANAÚ",
+  "short_name": "PARE ALERTA",
   "description": "Alertas de parada obrigatoria e radares para motoristas.",
   "start_url": "/",
   "scope": "/",
