@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { CSSProperties, SyntheticEvent } from "react";
 import mapboxgl from "mapbox-gl";
 import { motion, AnimatePresence } from "motion/react";
 import { INITIAL_RADAR_SITES, getDistance, SIMULATION_ROUTES, generateSmoothedRoute } from "./data";
@@ -28,6 +29,42 @@ const mapboxAccessToken = (import.meta as any).env?.VITE_MAPBOX_ACCESS_TOKEN ?? 
 mapboxgl.accessToken = mapboxAccessToken;
 
 const isProduction = !!(import.meta as any).env?.PROD || (import.meta as any).env?.VITE_APP_ENV === "production";
+const defaultWarningVideoAspect = {
+  cssRatio: "9 / 16",
+  widthRatio: 9 / 16,
+};
+const warningVideoDistanceMeters = 100;
+const warningVideoResetDistanceMeters = 140;
+
+type LocationStatus = "idle" | "requesting" | "tracking" | "error" | "unsupported";
+
+const getBearing = (startLat: number, startLng: number, endLat: number, endLng: number) => {
+  const startLatRad = startLat * Math.PI / 180;
+  const endLatRad = endLat * Math.PI / 180;
+  const lngDiffRad = (endLng - startLng) * Math.PI / 180;
+
+  const y = Math.sin(lngDiffRad) * Math.cos(endLatRad);
+  const x = Math.cos(startLatRad) * Math.sin(endLatRad) -
+    Math.sin(startLatRad) * Math.cos(endLatRad) * Math.cos(lngDiffRad);
+
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+};
+
+const getLocationErrorMessage = (error: GeolocationPositionError) => {
+  if (error.code === error.PERMISSION_DENIED) {
+    return "Permissão de localização negada.";
+  }
+
+  if (error.code === error.POSITION_UNAVAILABLE) {
+    return "Localização atual indisponível.";
+  }
+
+  if (error.code === error.TIMEOUT) {
+    return "Tempo esgotado ao buscar localização.";
+  }
+
+  return "Não foi possível obter a localização atual.";
+};
 
 export default function App() {
   // 1. Core Simple States
@@ -56,10 +93,13 @@ export default function App() {
   const [mapStyle, setMapStyle] = useState<string>("mapbox://styles/mapbox/dark-v11");
   const [isWarningVideoOpen, setIsWarningVideoOpen] = useState(false);
   const [dismissedWarningId, setDismissedWarningId] = useState<string | null>(null);
+  const [locationStatus, setLocationStatus] = useState<LocationStatus>("idle");
+  const [locationError, setLocationError] = useState<string | null>(null);
   
   // High quality default warning video URL to ensure perfect immediate playability!
   const [stopSignVideoSrc] = useState("https://prefmara.s3.sa-east-1.amazonaws.com/pref.mp4");
   const [isVideoMuted, setIsVideoMuted] = useState(false);
+  const [warningVideoAspect, setWarningVideoAspect] = useState(defaultWarningVideoAspect);
 
   // Refs for tracking map elements
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -67,9 +107,137 @@ export default function App() {
   const driverMarkerRef = useRef<mapboxgl.Marker | null>(null);
   const radarMarkersRef = useRef<{ [key: string]: mapboxgl.Marker }>({});
   const lastAutoTriggeredRef = useRef<string | null>(null);
+  const previousClosestRadarRef = useRef<{ id: string; distance: number } | null>(null);
+  const locationWatchIdRef = useRef<number | null>(null);
 
   // 2. Compute dynamic distance and warning state relative to stop sign
   const stopSignRadar = radars.find(r => r.tipo === "Parada Obrigatória") || radars[radars.length - 1];
+  const warningVideoFrameStyle = {
+    "--warning-video-aspect": warningVideoAspect.cssRatio,
+    "--warning-video-width-ratio": warningVideoAspect.widthRatio,
+  } as CSSProperties & {
+    "--warning-video-aspect": string;
+    "--warning-video-width-ratio": number;
+  };
+
+  const handleWarningVideoMetadata = (event: SyntheticEvent<HTMLVideoElement>) => {
+    const video = event.currentTarget;
+
+    if (!video.videoWidth || !video.videoHeight) return;
+
+    const widthRatio = video.videoWidth / video.videoHeight;
+    if (!Number.isFinite(widthRatio) || widthRatio <= 0) return;
+
+    setWarningVideoAspect({
+      cssRatio: `${video.videoWidth} / ${video.videoHeight}`,
+      widthRatio,
+    });
+  };
+
+  const clearLocationWatch = () => {
+    if (locationWatchIdRef.current === null || !("geolocation" in navigator)) return;
+
+    navigator.geolocation.clearWatch(locationWatchIdRef.current);
+    locationWatchIdRef.current = null;
+  };
+
+  const centerMapOnCurrentLocation = () => {
+    if (!mapRef.current) return;
+
+    mapRef.current.flyTo({
+      center: [currentLocation.longitude, currentLocation.latitude],
+      zoom: 16,
+      pitch: 50,
+      bearing: currentLocation.heading,
+      duration: 900,
+    });
+  };
+
+  const beginLocationTracking = () => {
+    if (!("geolocation" in navigator)) {
+      setLocationStatus("unsupported");
+      setLocationError("Este navegador não suporta localização.");
+      return;
+    }
+
+    if (!window.isSecureContext) {
+      setLocationStatus("error");
+      setLocationError("A localização atual exige HTTPS ou localhost.");
+      return;
+    }
+
+    if (locationWatchIdRef.current !== null) {
+      centerMapOnCurrentLocation();
+      return;
+    }
+
+    setLocationStatus("requesting");
+    setLocationError(null);
+
+    locationWatchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        const { latitude, longitude, speed, heading } = position.coords;
+
+        setIsSimulating(false);
+        setLocationStatus("tracking");
+        setLocationError(null);
+
+        setCurrentLocation((previousLocation) => {
+          const movedDistance = getDistance(
+            previousLocation.latitude,
+            previousLocation.longitude,
+            latitude,
+            longitude
+          );
+          const measuredHeading = typeof heading === "number" && Number.isFinite(heading)
+            ? heading
+            : null;
+          const inferredHeading = movedDistance > 2
+            ? getBearing(previousLocation.latitude, previousLocation.longitude, latitude, longitude)
+            : previousLocation.heading;
+          const measuredSpeed = typeof speed === "number" && Number.isFinite(speed) && speed >= 0
+            ? Math.round(speed * 3.6)
+            : 0;
+
+          return {
+            latitude,
+            longitude,
+            speed: measuredSpeed,
+            heading: measuredHeading ?? inferredHeading,
+          };
+        });
+      },
+      (error) => {
+        setLocationStatus("error");
+        setLocationError(getLocationErrorMessage(error));
+        clearLocationWatch();
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 3000,
+        timeout: 15000,
+      }
+    );
+  };
+
+  const handleUseCurrentLocation = () => {
+    setIsSimulating(false);
+    previousClosestRadarRef.current = null;
+    beginLocationTracking();
+  };
+
+  const handleToggleSimulation = () => {
+    if (isSimulating) {
+      setIsSimulating(false);
+      return;
+    }
+
+    clearLocationWatch();
+    setLocationStatus("idle");
+    setLocationError(null);
+    previousClosestRadarRef.current = null;
+    setIsSimulating(true);
+  };
 
   const radarsWithDistance = radars.map((radar) => {
     const dist = getDistance(
@@ -98,6 +266,11 @@ export default function App() {
 
   // Teleport helper to quickly test warnings without waiting
   const handleTeleportToApproaching = () => {
+    clearLocationWatch();
+    setLocationStatus("idle");
+    setLocationError(null);
+    previousClosestRadarRef.current = null;
+
     // Find the step on the route that is about 150m from the stop sign
     // Let's find index that is closest to -3.878000, -38.624500 (approx 120-150m away)
     const targetIndex = smoothedRoutePoints.findIndex(pt => {
@@ -174,26 +347,55 @@ export default function App() {
     };
   }, [isSimulating, smoothedRoutePoints]);
 
+  useEffect(() => {
+    if (isProduction) {
+      beginLocationTracking();
+    }
+
+    return () => clearLocationWatch();
+  }, []);
+
   // 4. Trigger Video pop up automatically on stop sign approach
   useEffect(() => {
     if (!closestRadar) return;
 
     const isStopSign = closestRadar.tipo === "Parada Obrigatória";
-    const isClose = closestRadar.distance <= 180;
+    const isLocationActive = isSimulating || locationStatus === "tracking";
+    const previousClosestRadar = previousClosestRadarRef.current;
 
-    if (isStopSign && isClose && dismissedWarningId !== closestRadar.id) {
+    if (!isStopSign || !isLocationActive) {
+      previousClosestRadarRef.current = null;
+      return;
+    }
+
+    const enteredWarningZone = !!previousClosestRadar &&
+      previousClosestRadar.id === closestRadar.id &&
+      previousClosestRadar.distance > warningVideoDistanceMeters &&
+      closestRadar.distance <= warningVideoDistanceMeters;
+    const startedInsideLiveWarningZone = !previousClosestRadar &&
+      locationStatus === "tracking" &&
+      closestRadar.distance <= warningVideoDistanceMeters;
+
+    if ((enteredWarningZone || startedInsideLiveWarningZone) && dismissedWarningId !== closestRadar.id) {
       if (lastAutoTriggeredRef.current !== closestRadar.id) {
-        // Open video automatically without voice or sound
         setIsWarningVideoOpen(true);
         lastAutoTriggeredRef.current = closestRadar.id;
       }
     }
 
     // Reset auto-trigger memory when driving far away
-    if (closestRadar.distance > 250) {
+    if (closestRadar.distance > warningVideoResetDistanceMeters) {
       lastAutoTriggeredRef.current = null;
+      if (dismissedWarningId === closestRadar.id) {
+        setDismissedWarningId(null);
+      }
     }
-  }, [closestRadar?.id, closestRadar?.distance, dismissedWarningId]);
+
+    previousClosestRadarRef.current = {
+      id: closestRadar.id,
+      distance: closestRadar.distance,
+    };
+  }, [closestRadar?.id, closestRadar?.distance, dismissedWarningId, isSimulating, locationStatus]);
 
   // 5. Initialize Full Screen Mapbox
   useEffect(() => {
@@ -337,8 +539,8 @@ export default function App() {
       needleEl.style.transform = `rotate(${currentLocation.heading}deg)`;
     }
 
-    // Keep camera following driver smoothly in simulation mode
-    if (isSimulating) {
+    // Keep camera following the active driver source smoothly
+    if (isSimulating || locationStatus === "tracking") {
       mapRef.current.easeTo({
         center: currentLngLat,
         bearing: currentLocation.heading,
@@ -346,7 +548,7 @@ export default function App() {
         pitch: 50,
       });
     }
-  }, [currentLocation.latitude, currentLocation.longitude, currentLocation.heading, isSimulating]);
+  }, [currentLocation.latitude, currentLocation.longitude, currentLocation.heading, isSimulating, locationStatus]);
 
   return (
     <main className="w-full h-screen bg-[#0f172a] text-[#f8fafc] flex flex-col font-sans relative overflow-hidden" id="radar-monitoring-app">
@@ -379,7 +581,7 @@ export default function App() {
 
             {/* Quick Simulation Trigger Button */}
             <button
-              onClick={() => setIsSimulating(!isSimulating)}
+              onClick={handleToggleSimulation}
               className={`py-1.5 px-3 rounded-lg text-[10px] font-extrabold flex items-center gap-1 cursor-pointer transition-colors ${
                 isSimulating 
                   ? "bg-slate-900 border border-[#22c55e]/20 text-[#22c55e]" 
@@ -425,70 +627,94 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        <button
+          onClick={handleUseCurrentLocation}
+          className={`bg-slate-950/90 backdrop-blur-md px-3 py-2 rounded-xl border shadow-lg flex items-center gap-2 self-start pointer-events-auto transition-colors cursor-pointer ${
+            locationStatus === "tracking"
+              ? "border-emerald-500/30 text-emerald-300"
+              : locationStatus === "error" || locationStatus === "unsupported"
+                ? "border-red-500/30 text-red-300"
+                : "border-slate-800/80 text-slate-200 hover:border-slate-700"
+          }`}
+          title={locationError || "Usar localização atual"}
+        >
+          <Navigation className="w-3.5 h-3.5 shrink-0" />
+          <span className="text-[10px] font-extrabold uppercase tracking-wide">
+            {locationStatus === "requesting"
+              ? "Localizando"
+              : locationStatus === "tracking"
+                ? "GPS Atual"
+                : "Usar GPS"}
+          </span>
+        </button>
+
+        {locationError && (
+          <div className="bg-red-950/90 border border-red-500/30 text-red-100 px-3 py-2 rounded-xl shadow-lg max-w-xs pointer-events-auto">
+            <p className="text-[10px] font-bold leading-snug">{locationError}</p>
+          </div>
+        )}
       </div>
 
-      {/* Immersive Centered Warning Video Modal Overlay - Configured as fullscreen vertical-optimized display */}
+      {/* Immersive warning video modal */}
       <AnimatePresence>
         {isWarningVideoOpen && (
-          <div className="fixed inset-0 z-50 bg-black flex flex-col justify-center items-center">
+          <div className="fixed inset-0 z-50 bg-black flex items-center justify-center overflow-hidden">
             <motion.div
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.98 }}
               transition={{ duration: 0.25 }}
-              className="relative w-full h-full flex flex-col justify-center items-center bg-black"
+              className="warning-video-stage relative bg-black shadow-2xl"
               id="stop-sign-video-modal"
+              style={warningVideoFrameStyle}
             >
-              {/* Elegant floating header controls atop vertical view */}
-              <div className="absolute top-6 left-6 right-6 z-50 flex items-center justify-between pointer-events-none">
-                {/* Active alert indicator */}
-                <div className="bg-red-600/95 border border-red-500/20 text-white font-black text-xs px-4 py-2 rounded-xl shadow-2xl flex items-center gap-2.5 tracking-widest uppercase pointer-events-auto">
-                  <span className="w-2.5 h-2.5 rounded-full bg-white animate-ping" />
-                  ALERTA EM TEMPO REAL: PARADA OBRIGATÓRIA
-                </div>
+              <video
+                src={stopSignVideoSrc}
+                autoPlay
+                loop
+                muted={isVideoMuted}
+                playsInline
+                onLoadedMetadata={handleWarningVideoMetadata}
+                className="warning-video-player"
+                key={stopSignVideoSrc}
+              />
 
-                <div className="flex items-center gap-3 pointer-events-auto">
-                  {/* Speaker Mute/Unmute Float Tool */}
-                  <button
-                    onClick={() => setIsVideoMuted(!isVideoMuted)}
-                    className="p-3 bg-black/60 hover:bg-black text-white rounded-full border border-white/10 transition-colors cursor-pointer flex items-center justify-center shadow-2xl"
-                    title={isVideoMuted ? "Ativar Áudio" : "Mutar Áudio"}
-                  >
-                    {!isVideoMuted ? <Volume2 className="w-5 h-5 text-blue-400 font-bold" /> : <VolumeX className="w-5 h-5 text-slate-400" />}
-                  </button>
+              <div className="warning-video-topbar absolute inset-x-0 top-0 z-20 bg-gradient-to-b from-black/85 via-black/45 to-transparent px-3 pb-12 pointer-events-none">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 bg-red-600/95 border border-red-500/20 text-white font-black text-[10px] sm:text-xs px-3 py-2 rounded-xl shadow-2xl flex items-center gap-2 tracking-widest uppercase pointer-events-auto">
+                    <span className="w-2 h-2 rounded-full bg-white animate-ping shrink-0" />
+                    <span className="truncate">Parada Obrigatória</span>
+                  </div>
 
-                  {/* Accessible Close Button */}
-                  <button 
-                    onClick={() => {
-                      setIsWarningVideoOpen(false);
-                      setDismissedWarningId(stopSignRadar.id);
-                    }}
-                    className="p-3 bg-red-600 hover:bg-red-700 text-white rounded-full border border-white/10 cursor-pointer transition-colors shadow-2xl flex items-center justify-center"
-                    title="Fechar Vídeo e Voltar ao Mapa"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0 pointer-events-auto">
+                    <button
+                      onClick={() => setIsVideoMuted(!isVideoMuted)}
+                      className="w-10 h-10 bg-black/65 hover:bg-black text-white rounded-full border border-white/10 transition-colors cursor-pointer flex items-center justify-center shadow-2xl"
+                      title={isVideoMuted ? "Ativar Áudio" : "Mutar Áudio"}
+                      aria-label={isVideoMuted ? "Ativar Áudio" : "Mutar Áudio"}
+                    >
+                      {!isVideoMuted ? <Volume2 className="w-5 h-5 text-blue-400 font-bold" /> : <VolumeX className="w-5 h-5 text-slate-400" />}
+                    </button>
+
+                    <button 
+                      onClick={() => {
+                        setIsWarningVideoOpen(false);
+                        setDismissedWarningId(stopSignRadar.id);
+                      }}
+                      className="w-10 h-10 bg-red-600 hover:bg-red-700 text-white rounded-full border border-white/10 cursor-pointer transition-colors shadow-2xl flex items-center justify-center"
+                      title="Fechar Vídeo e Voltar ao Mapa"
+                      aria-label="Fechar Vídeo e Voltar ao Mapa"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              {/* Vertical live video player capturing full bounds height */}
-              <div className="w-full h-full max-h-screen flex items-center justify-center bg-black">
-                <video
-                  src={stopSignVideoSrc}
-                  autoPlay
-                  loop
-                  muted={isVideoMuted}
-                  controls
-                  playsInline
-                  className="h-full w-auto max-w-full object-contain shadow-2xl"
-                  key={stopSignVideoSrc}
-                />
-              </div>
-
-              {/* Action notice helper at bottom */}
-              <div className="absolute bottom-6 left-6 right-6 z-40 text-center pointer-events-none">
-                <div className="bg-slate-900/90 border border-slate-800 backdrop-blur px-5 py-3 rounded-2xl max-w-md mx-auto shadow-2xl pointer-events-auto">
-                  <p className="text-xs font-bold text-slate-300">
+              <div className="warning-video-bottombar absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/90 via-black/55 to-transparent px-3 pt-16 pointer-events-none">
+                <div className="bg-slate-950/80 border border-white/10 backdrop-blur px-4 py-3 rounded-xl shadow-2xl pointer-events-auto">
+                  <p className="text-[11px] sm:text-xs leading-snug font-bold text-slate-200">
                     Avanço de Parada Obrigatória gera multa de <strong className="text-red-400">R$ 293,47</strong> e <strong className="text-red-400">7 pontos</strong> na CNH.
                   </p>
                   <button
@@ -496,7 +722,7 @@ export default function App() {
                       setIsWarningVideoOpen(false);
                       setDismissedWarningId(stopSignRadar.id);
                     }}
-                    className="mt-2.5 w-full py-2 bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs rounded-xl cursor-pointer transition-colors shadow-md"
+                    className="mt-2.5 w-full h-10 bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs rounded-xl cursor-pointer transition-colors shadow-md"
                   >
                     Entendido, Voltar ao Mapa
                   </button>
