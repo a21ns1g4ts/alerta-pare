@@ -1,0 +1,6 @@
+{
+  "name": "Radar Alerta",
+  "description": "Aplicativo para alertar motoristas sobre controladores de velocidade (radares), ajudando a evitar acidentes através do controle de velocidade.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
