@@ -1,7 +1,7 @@
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
-oimport {PwaInstallGate} from './components/PwaInstallGate.tsx';
+import {PwaInstallGate} from './components/PwaInstallGate.tsx';
 import './index.css';
 
 if ('serviceWorker' in navigator && window.isSecureContext) {
