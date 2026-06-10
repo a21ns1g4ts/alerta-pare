@@ -98,7 +98,7 @@ export function PwaInstallGate({ children }: PropsWithChildren) {
                 Acesso restrito
               </p>
               <h1 className="mt-1 text-2xl font-black leading-tight">
-                Instale o Radar Alerta
+                Radar Alerta Maracanaú
               </h1>
               <p className="mt-2 text-sm leading-relaxed text-slate-300">
                 Este app só funciona instalado como PWA para garantir uma experiência dedicada de alerta no trânsito.
